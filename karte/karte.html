@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Room Map Finder</title>
+  <style>
+    :root {
+      --bg: #f7f7f8;
+      --ink: #0f0f10;
+      --line: #d7d7db;
+      --accent: #ff3b30; /* red */
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font: 16px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: var(--bg);
+      color: var(--ink);
+      min-height: 100dvh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .wrap {
+      width: 100%;
+      padding: 16px clamp(16px, 3vw, 28px) 24px;
+      display: grid;
+      grid-template-rows: auto 1fr; /* search + map */
+      gap: 14px;
+      min-height: 100dvh; /* fill viewport so map can grow */
+    }
+
+    /* Search */
+    .search { position: relative; z-index: 20; }
+    .search input[type="text"]{
+      width: 100%;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+      outline: none;
+      font-size: 16px;
+      transition: box-shadow .2s ease, border-color .2s ease;
+    }
+    .search input[type="text"]:focus{
+      border-color: #c9c9cf;
+      box-shadow: 0 6px 24px rgba(0,0,0,.06);
+    }
+
+    /* Suggestions dropdown is portaled to <body> and positioned via JS */
+    .suggestions {
+      position: fixed; /* avoids clipping and stacking issues */
+      left: 0; top: 0; /* JS updates these */
+      width: 320px;    /* JS updates this */
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 6px;
+      display: none;
+      max-height: 260px;
+      overflow: auto;
+      box-shadow: 0 12px 36px rgba(0,0,0,.12);
+      z-index: 99999;
+    }
+    .suggestions.open{ display:block; }
+    .suggestions button{
+      width: 100%;
+      text-align: left;
+      padding: 10px 10px;
+      background: transparent;
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .suggestions button:hover,
+    .suggestions button:focus{ background: #f2f2f4; outline: none; }
+
+    /* Map layout */
+    .map {
+      --gap: clamp(8px, 1.2vw, 18px);
+      display: grid;
+      grid-template-columns: 1.2fr 1.8fr 1.2fr; /* left / middle / right */
+      gap: var(--gap);
+      width: 100%;
+      height: 100%;
+      min-height: clamp(480px, 70dvh, 1000px); /* avoid vertical compression on reload */
+      min-width: 0;
+    }
+
+    /* Panel basics */
+    .panel {
+      border: clamp(1px, .25vw, 1px) solid #c9c9cf;
+      background: #fff;
+      border-radius: clamp(8px, 1vw, 12px);
+      position: relative;
+      transition: box-shadow .25s ease, background-color .25s ease, border-color .25s ease, transform .2s ease;
+      overflow: hidden;
+    }
+    /* light-up effect */
+    .panel.lit {
+      background: var(--accent);           /* solid red fill */
+      border-color: var(--accent);         /* red borders */
+      box-shadow: 0 0 0 2px rgba(255,59,48,.65) inset,
+                  0 10px 36px rgba(255,59,48,.35),
+                  0 0 28px rgba(255,59,48,.45); /* glow */
+    }
+    .panel.lit::after{
+      content: "";
+      position: absolute; inset: 0;
+      box-shadow: 0 0 80px 28px rgba(255,59,48,.35);
+      pointer-events: none;
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:.45} 50%{opacity:0} }
+
+    /* LEFT column structure (A over C/D over F/G) */
+    .left { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 0.8fr 1fr 1fr; gap: var(--gap); height: 100%; min-height: 0; }
+    .left .a { grid-column: 1 / 3; }
+    .left .c { grid-column: 1 / 2; }
+    .left .d { grid-column: 2 / 3; }
+    .left .f { grid-column: 1 / 2; }
+    .left .g { grid-column: 2 / 3; }
+
+    /* MIDDLE is a single big panel (E) */
+    .middle { display: grid; height: 100%; min-height: 0; }
+
+    /* RIGHT column structure (B at top, then strips, H at bottom) */
+    .right { display: grid; grid-template-rows: 1.1fr repeat(3, .45fr) 0.6fr; gap: var(--gap); height: 100%; min-height: 0; }
+
+    /* Responsive tweaks */
+    @media (max-width: 1100px){ .map { grid-template-columns: 1fr 1.6fr 1fr; } }
+    @media (max-width: 760px){
+      .map { grid-template-columns: 1fr; grid-template-rows: 1fr 1.2fr 1fr; min-height: clamp(460px, 72dvh, 900px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="search" role="search">
+      <input id="query" type="text" placeholder="Search items…" autocomplete="off"/>
+    </div>
+
+    <div class="map" aria-label="Room map">
+      <div class="left">
+        <section class="panel a" data-section="A" aria-label="Section A"></section>
+        <section class="panel c" data-section="C" aria-label="Section C"></section>
+        <section class="panel d" data-section="D" aria-label="Section D"></section>
+        <section class="panel f" data-section="F" aria-label="Section F"></section>
+        <section class="panel g" data-section="G" aria-label="Section G"></section>
+      </div>
+      <div class="middle">
+        <section class="panel e" data-section="E" aria-label="Section E" style="height:100%"></section>
+      </div>
+      <div class="right">
+        <section class="panel b" data-section="B" aria-label="Section B"></section>
+        <section class="panel r1" data-section="R1" aria-hidden="true"></section>
+        <section class="panel r2" data-section="R2" aria-hidden="true"></section>
+        <section class="panel r3" data-section="R3" aria-hidden="true"></section>
+        <section class="panel h" data-section="H" aria-label="Section H"></section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Suggestions list lives at the end of body so we can portal/control stacking reliably -->
+  <div id="suggestions" class="suggestions" role="listbox" aria-label="Suggestions"></div>
+
+  <script>
+    // === DATA ===============================================================
+    // Define your inventory: sections → items. Add as many as you like.
+    const SECTIONS = {
+      A: ["albums", "fotogrāfijas", "apbalvojumi", "rotaļlietas", "vainaga nometne"],
+      B: ["dzērieni", "higēna", "dezuderants", "pudeles", "Lotes komplimentu lapiņas", "Lotes kuponi", "aproces", "matu gumijas", "enģelīts", "Lotes vēstules", "saulesbrilles", "matu sprādzes", "elektrolīti", "atslēgas", "piekariņi"],
+      C: ["mājturība", "arts&crafts", "mērlente", "magnēti", "knaģi", "līmlente", "skočs", "lipekļi", "skrūvgriezis", "knaibles", "rīki", "cirkulis", "aploksnes", "uzlīmes", "līme", "zīmuļi", "flomasteri", "marķieri", "filmiņas", "jaunības radošie darbi / zīmējumi", "mapītes", "folderi", "tāfeles", "atzinības / apbalvojumi / brīvprātīgais d."],
+      D: ["skola", "kalkulators", "lineāli", "penālis"],
+      E: ["atmiņas diski", "pirmās vajadzības vadi", "austiņu vads", "marķieri", "dzejoļi", "čeki", "alus korķīši", "maka krājumi/lapiņas/random", "nagu šķēres", "šķēres", "Lotes bitīte", "Lotes kristāli", "deju programmas", "sīknauda"],
+      F: ["tukšas kastes", "NERF", "stabilizators", "dabas atradumi", "dzērieni", "boulings", "deju svētku krātuve", "skaidas", "burbuļplēve"],
+      G: ["LEGO", "bugatti/mašīna", "random lietas", "mašīnītes", "VITC", "memorabilia", "avīzes", "kārtis", "aproces", "rotas", "valūtu/naudas kolekcija", "bloknoti/piezīmjblociņi", "VR brilles", "Grafiskā karte", "SMU piemiņa", "tīrīšanas piederumi / salvetes", "trauciņš / zīmuļu turētājs", "alus josta"],
+      H: ["elektronika", "vasaras lasīšana", "foto aparatūra", "mikrofoni", "baterijas", "vadi / lādētāji / adapteri", "powerbank", "peles", "klaviatūras", "rācijas", "samsung pulkstenis", "skrūves (mikrofonam)", "austiņas / audio vadi", "austiņu maciņš", "radio", "velo gaismiņas", "adapteri", "random lietas", "COVID tests", "tenisa bumbiņa", "instrukcijas", "filmiņu iepakojums", "rakstāmmašīnas lentes", "time-lapse taimeris"]
+    };
+
+    // Build an item→sections index (case-insensitive keys)
+    const itemIndex = new Map();
+    for (const [section, items] of Object.entries(SECTIONS)) {
+      for (const raw of items) {
+        const key = raw.trim().toLowerCase();
+        if (!itemIndex.has(key)) itemIndex.set(key, new Set());
+        itemIndex.get(key).add(section);
+      }
+    }
+
+    // === Elements ===========================================================
+    const q = document.getElementById('query');
+    const list = document.getElementById('suggestions');
+    const wrapEl = document.querySelector('.wrap');
+    const mapEl = document.querySelector('.map');
+    const searchEl = document.querySelector('.search');
+
+    // === Height guard: ensure the map never compresses vertically ===========
+    function setMapMinHeight(){
+      const viewportH = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+      const cs = getComputedStyle(wrapEl);
+      const topPad = parseFloat(cs.paddingTop) || 0;
+      const bottomPad = parseFloat(cs.paddingBottom) || 0;
+      // leave 16px breathing room
+      const available = viewportH - (searchEl.offsetHeight + topPad + bottomPad + 16);
+      mapEl.style.minHeight = Math.max(480, available) + 'px';
+    }
+    window.addEventListener('load', setMapMinHeight);
+    window.addEventListener('resize', setMapMinHeight);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', setMapMinHeight);
+
+    // === Highlight helpers ==================================================
+    function clearHighlights(){
+      document.querySelectorAll('.panel.lit').forEach(el => el.classList.remove('lit'));
+    }
+
+    function highlightSections(sectionSet){
+      clearHighlights();
+      for (const s of sectionSet) {
+        const el = document.querySelector(`[data-section="${s}"]`);
+        if (el) el.classList.add('lit');
+      }
+    }
+
+    function closeSuggestions(){
+      list.classList.remove('open');
+      list.innerHTML = '';
+    }
+
+    let _lastMatches = [];
+    function openSuggestions(items){
+      _lastMatches = items.slice();
+      list.innerHTML = '';
+      for (const item of items) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute('role','option');
+        btn.textContent = item;
+        btn.addEventListener('click', () => selectItem(item));
+        list.appendChild(btn);
+      }
+
+      if (items.length) {
+        const r = q.getBoundingClientRect();
+        list.style.left = r.left + 'px';
+        list.style.top = (r.bottom + 6) + 'px';
+        list.style.width = r.width + 'px';
+        list.style.maxHeight = Math.max(140, window.innerHeight - (r.bottom + 24)) + 'px';
+        list.classList.add('open');
+      } else {
+        closeSuggestions();
+      }
+    }
+
+    function selectItem(label){
+      q.value = label;
+      const key = label.toLowerCase();
+      const sections = itemIndex.get(key) || new Set();
+      highlightSections(sections);
+      closeSuggestions();
+    }
+
+    // Filter items when the user types
+    q.addEventListener('input', (e) => {
+      const term = e.target.value.trim().toLowerCase();
+      if (term.length < 2) { closeSuggestions(); clearHighlights(); return; }
+      const matches = [...itemIndex.keys()].filter(k => k.includes(term)).slice(0, 50);
+      openSuggestions(matches);
+    });
+
+    // Enter/Escape handling
+    q.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const first = list.querySelector('button');
+        if (first) { e.preventDefault(); first.click(); }
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closeSuggestions(); }
+    });
+
+    // Click outside to close
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.search') && !e.target.closest('#suggestions')) closeSuggestions();
+    });
+
+    // Keep dropdown aligned on resize/scroll while open
+    function maybeReposition(){ if (list.classList.contains('open')) openSuggestions(_lastMatches); }
+    window.addEventListener('resize', maybeReposition);
+    window.addEventListener('scroll', maybeReposition, true);
+
+    // === Diagnostics in console ============================================
+    (function runDiagnostics(){
+      const results = [];
+      function test(name, fn){ try { fn(); results.push({name, ok:true}); } catch(err){ results.push({name, ok:false, err:String(err)}); } }
+
+      // Test 1: duplicate item indexes to multiple sections
+      test('Index merges duplicate items ("tape" in C & F)', () => {
+        const s = itemIndex.get('tape');
+        if (!s || !s.has('C') || !s.has('F')) throw new Error('Expected tape in C and F');
+      });
+
+      // Test 2: selecting duplicate item lights multiple sections
+      test('Selecting "tape" lights C & F', () => {
+        selectItem('tape');
+        const lit = Array.from(document.querySelectorAll('.panel.lit')).map(el => el.dataset.section);
+        if (!(lit.includes('C') && lit.includes('F'))) throw new Error('C & F should be lit');
+        clearHighlights();
+      });
+
+      // Test 3: suggestions appear after 2 chars
+      test('Suggestions open after 2 letters', () => {
+        q.value = 'ta';
+        q.dispatchEvent(new Event('input', {bubbles:true}));
+        if (!list.classList.contains('open')) throw new Error('Suggestions should be open');
+        closeSuggestions();
+        q.value = '';
+      });
+
+      console.log('%cRoom Map Finder diagnostics', 'font-weight:bold');
+      results.forEach(r => console[r.ok ? 'log' : 'error'](r.ok ? `✓ ${r.name}` : `✗ ${r.name} — ${r.err}`));
+    })();
+  </script>
+</body>
+</html>
